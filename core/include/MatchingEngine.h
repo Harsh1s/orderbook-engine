@@ -102,3 +102,56 @@ public:
         return success;
     }
 
+    bool amend_order(const AmendRequest& req) {
+        std::string sym(req.symbol, std::strlen(req.symbol));
+        auto it = books_.find(sym);
+        if (it == books_.end()) return false;
+
+        bool success = it->second.amend_order(req);
+        if (success) ++stats_.total_amends;
+        return success;
+    }
+
+    // ═══════════════════════════════════════════
+    // Global trade callback
+    // ═══════════════════════════════════════════
+
+    using GlobalTradeCallback = std::function<void(const Trade&)>;
+
+    void set_trade_callback(GlobalTradeCallback cb) {
+        global_trade_callback_ = std::move(cb);
+    }
+
+    // ═══════════════════════════════════════════
+    // Statistics
+    // ═══════════════════════════════════════════
+
+    [[nodiscard]] EngineStats get_stats() const {
+        EngineStats s = stats_;
+        s.active_orders = 0;
+        s.symbols_active = books_.size();
+        for (const auto& [sym, book] : books_) {
+            s.active_orders += book.active_orders();
+        }
+        return s;
+    }
+
+    [[nodiscard]] const std::unordered_map<std::string, OrderBook>& books() const {
+        return books_;
+    }
+
+private:
+    void on_trade(const Trade& trade) {
+        ++stats_.total_trades;
+        stats_.total_volume += trade.quantity;
+        if (global_trade_callback_) {
+            global_trade_callback_(trade);
+        }
+    }
+
+    std::unordered_map<std::string, OrderBook> books_;
+    EngineStats stats_;
+    GlobalTradeCallback global_trade_callback_;
+};
+
+} // namespace micro_exchange::core
