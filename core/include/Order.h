@@ -58,3 +58,125 @@ static constexpr Price PRICE_MARKET  = 0;  // Market orders have no price limit
 
 // ─────────────────────────────────────────────
 // Timestamp: nanosecond precision
+// ─────────────────────────────────────────────
+
+using Timestamp = std::chrono::time_point<std::chrono::steady_clock>;
+
+inline uint64_t timestamp_ns(Timestamp ts) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            ts.time_since_epoch()
+        ).count()
+    );
+}
+
+inline Timestamp now() {
+    return std::chrono::steady_clock::now();
+}
+
+// ─────────────────────────────────────────────
+// Order
+// Cache-line aligned for performance.
+// Intrusive linked-list pointers for O(1) queue ops.
+// ─────────────────────────────────────────────
+
+struct alignas(64) Order {
+    // ── Identifiers ──
+    OrderId     id          = 0;
+    SeqNum      sequence    = 0;       // Global sequence for determinism
+
+    // ── Order parameters ──
+    Side        side        = Side::Buy;
+    OrderType   type        = OrderType::Limit;
+    TimeInForce tif         = TimeInForce::GTC;
+    Price       price       = 0;       // In ticks
+    Price       stop_price  = 0;       // Trigger price for Stop / StopLimit
+    Quantity    quantity    = 0;        // Original quantity
+    Quantity    filled_qty  = 0;        // Cumulative filled
+    Quantity    leaves_qty  = 0;        // Remaining = quantity - filled_qty
+
+    // ── Timestamps ──
+    Timestamp   entry_time  = {};
+    Timestamp   last_update = {};
+
+    // ── Status ──
+    OrderStatus status      = OrderStatus::New;
+
+    // ── Intrusive doubly-linked list pointers ──
+    // Used by PriceLevel to maintain FIFO queue without heap allocation.
+    Order*      prev        = nullptr;
+    Order*      next        = nullptr;
+
+    // ── Symbol (for multi-instrument support) ──
+    char        symbol[16]  = {};
+
+    // ── Convenience ──
+    [[nodiscard]] bool is_buy() const noexcept { return side == Side::Buy; }
+    [[nodiscard]] bool is_filled() const noexcept { return leaves_qty == 0; }
+    [[nodiscard]] bool is_active() const noexcept {
+        return status == OrderStatus::New || status == OrderStatus::PartiallyFilled;
+    }
+
+    // Hot-path variants take a caller-supplied timestamp. The matching engine
+    // captures now() once per inbound event and threads it through every fill,
+    // rather than re-reading the clock (~17ns) several times per order.
+    void fill(Quantity qty, Timestamp ts) noexcept {
+        filled_qty += qty;
+        leaves_qty -= qty;
+        last_update = ts;
+        status = (leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+    }
+    void fill(Quantity qty) noexcept { fill(qty, now()); }
+
+    void cancel(Timestamp ts) noexcept {
+        status = OrderStatus::Cancelled;
+        leaves_qty = 0;
+        last_update = ts;
+    }
+    void cancel() noexcept { cancel(now()); }
+};
+
+// ─────────────────────────────────────────────
+// Trade (execution report)
+// ─────────────────────────────────────────────
+
+struct Trade {
+    SeqNum      sequence     = 0;
+    OrderId     buy_order_id = 0;
+    OrderId     sell_order_id = 0;
+    Price       price        = 0;
+    Quantity    quantity     = 0;
+    Timestamp   exec_time    = {};
+    Side        aggressor    = Side::Buy;  // Who crossed the spread
+
+    char        symbol[16]   = {};
+};
+
+// ─────────────────────────────────────────────
+// Order request messages (input events)
+// ─────────────────────────────────────────────
+
+struct NewOrderRequest {
+    OrderId     id          = 0;
+    Side        side        = Side::Buy;
+    OrderType   type        = OrderType::Limit;
+    TimeInForce tif         = TimeInForce::GTC;
+    Price       price       = 0;
+    Price       stop_price  = 0;   // Stop / StopLimit trigger
+    Quantity    quantity    = 0;
+    char        symbol[16]  = {};
+};
+
+struct CancelRequest {
+    OrderId     order_id;
+    char        symbol[16];
+};
+
+struct AmendRequest {
+    OrderId     order_id;
+    Price       new_price;     // 0 = no change
+    Quantity    new_quantity;   // 0 = no change
+    char        symbol[16];
+};
+
+} // namespace micro_exchange::core
