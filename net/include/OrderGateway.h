@@ -61,3 +61,66 @@ public:
             send_msg(client_fd_, MsgType::Exec, &e, sizeof(e));
             ++execs_sent_;
         });
+
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) throw std::runtime_error("socket() failed");
+
+        int yes = 1;
+        ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(port);
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            ::close(listen_fd_);
+            throw std::runtime_error("bind() failed");
+        }
+        if (::listen(listen_fd_, 16) < 0) {
+            ::close(listen_fd_);
+            throw std::runtime_error("listen() failed");
+        }
+
+        // Resolve the actual port (relevant when caller passed 0).
+        sockaddr_in bound{};
+        socklen_t blen = sizeof(bound);
+        ::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen);
+        port_ = ntohs(bound.sin_port);
+    }
+
+    ~OrderGateway() {
+        if (listen_fd_ >= 0) ::close(listen_fd_);
+    }
+
+    OrderGateway(const OrderGateway&) = delete;
+    OrderGateway& operator=(const OrderGateway&) = delete;
+
+    [[nodiscard]] uint16_t port() const { return port_; }
+
+    // Accept ONE client and process its order stream until it disconnects.
+    // Returns the number of inbound requests handled.
+    uint64_t serve_one_client() {
+        int fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (fd < 0) return 0;
+
+        // Disable Nagle: order entry wants each message out immediately.
+        int yes = 1;
+        ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+
+        client_fd_ = fd;
+        uint64_t handled = 0;
+
+        WireHeader h{};
+        while (recv_header(fd, h)) {
+            switch (static_cast<MsgType>(h.type)) {
+                case MsgType::NewOrder: handled += handle_new_order(fd, h); break;
+                case MsgType::Cancel:   handled += handle_cancel(fd, h);    break;
+                default:                drain(fd, h.len);                   break;
+            }
+        }
+
+        client_fd_ = -1;
+        ::close(fd);
+        return handled;
+    }
+
