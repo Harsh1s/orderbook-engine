@@ -124,3 +124,66 @@ public:
         return handled;
     }
 
+    [[nodiscard]] MatchingEngine::EngineStats stats() const { return engine_.get_stats(); }
+    [[nodiscard]] uint64_t execs_sent() const { return execs_sent_; }
+
+private:
+    uint64_t handle_new_order(int fd, const WireHeader& h) {
+        WireNewOrder w{};
+        if (h.len != sizeof(w) || !read_full(fd, &w, sizeof(w))) { drain(fd, h.len); return 0; }
+
+        NewOrderRequest req{};
+        req.id       = w.id;
+        req.side     = static_cast<Side>(w.side);
+        req.type     = static_cast<OrderType>(w.type);
+        req.tif      = static_cast<TimeInForce>(w.tif);
+        req.price    = w.price;
+        req.quantity = w.quantity;
+        std::memcpy(req.symbol, w.symbol, sizeof(req.symbol));
+
+        // Exec messages for this order are emitted synchronously by the trade
+        // callback during submit_order(); the Ack follows them.
+        Order* o = engine_.submit_order(req);
+
+        WireAck ack{};
+        ack.id         = w.id;
+        ack.status     = static_cast<uint8_t>(o ? AckStatus::Accepted : AckStatus::Rejected);
+        ack.filled_qty = o ? o->filled_qty : 0;
+        send_msg(fd, MsgType::Ack, &ack, sizeof(ack));
+        return 1;
+    }
+
+    uint64_t handle_cancel(int fd, const WireHeader& h) {
+        WireCancel w{};
+        if (h.len != sizeof(w) || !read_full(fd, &w, sizeof(w))) { drain(fd, h.len); return 0; }
+
+        CancelRequest req{};
+        req.order_id = w.id;
+        std::memcpy(req.symbol, w.symbol, sizeof(req.symbol));
+        bool ok = engine_.cancel_order(req);
+
+        WireAck ack{};
+        ack.id     = w.id;
+        ack.status = static_cast<uint8_t>(ok ? AckStatus::Cancelled : AckStatus::Unknown);
+        send_msg(fd, MsgType::Ack, &ack, sizeof(ack));
+        return 1;
+    }
+
+    // Discard an unrecognised / malformed payload so framing stays in sync.
+    void drain(int fd, uint32_t len) {
+        char buf[256];
+        while (len > 0) {
+            size_t chunk = len < sizeof(buf) ? len : sizeof(buf);
+            if (!read_full(fd, buf, chunk)) return;
+            len -= static_cast<uint32_t>(chunk);
+        }
+    }
+
+    std::string     symbol_;
+    MatchingEngine  engine_;
+    int             listen_fd_ = -1;
+    int             client_fd_ = -1;
+    uint16_t        port_      = 0;
+    uint64_t        execs_sent_ = 0;
+};
+
