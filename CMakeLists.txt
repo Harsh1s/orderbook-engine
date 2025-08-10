@@ -52,3 +52,31 @@ set_tests_properties(invariants PROPERTIES
     TIMEOUT 60
 )
 
+# Smoke test: a tiny end-to-end run of the main simulator. Catches the
+# kind of regression where the binary builds but immediately segfaults.
+add_test(
+    NAME simulator_smoke
+    COMMAND micro_exchange --duration 5 --output ${CMAKE_BINARY_DIR}/smoke_out
+)
+set_tests_properties(simulator_smoke PROPERTIES TIMEOUT 60)
+
+# Equivalence gate: the tick-indexed ArrayOrderBook must emit a trade stream
+# byte-identical to the std::map OrderBook on the same input, or CI fails.
+add_test(NAME orderbook_equivalence COMMAND bench_orderbook_compare)
+set_tests_properties(orderbook_equivalence PROPERTIES
+    PASS_REGULAR_EXPRESSION "identical trade stream: YES"
+    TIMEOUT 120
+)
+
+# Gateway gate: orders streamed over TCP and parsed back must produce trades
+# identical to the in-process engine, or CI fails.
+add_test(NAME gateway_e2e COMMAND test_gateway)
+set_tests_properties(gateway_e2e PROPERTIES
+    PASS_REGULAR_EXPRESSION "GATEWAY TEST PASSED"
+    TIMEOUT 60
+)
+
+install(TARGETS micro_exchange test_invariants test_gateway
+        bench_throughput bench_latency bench_orderbook_compare
+    RUNTIME DESTINATION bin
+)
