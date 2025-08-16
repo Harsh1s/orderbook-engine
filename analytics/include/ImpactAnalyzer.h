@@ -80,3 +80,85 @@ public:
         const std::vector<std::pair<double, Price>>& timed_midprices,
         double interval_sec = 5.0) const
     {
+        if (trades.empty() || timed_midprices.empty()) {
+            return {};
+        }
+
+        // ── Aggregate into intervals ──
+        double max_time = trades.back().timestamp;
+        size_t num_intervals = static_cast<size_t>(max_time / interval_sec) + 1;
+
+        // ΔX: signed order flow per interval
+        std::vector<double> delta_x(num_intervals, 0.0);
+        // ΔP: price change per interval
+        std::vector<double> delta_p(num_intervals, 0.0);
+
+        // Accumulate signed volume
+        for (const auto& t : trades) {
+            size_t bucket = static_cast<size_t>(t.timestamp / interval_sec);
+            if (bucket >= num_intervals) bucket = num_intervals - 1;
+
+            double signed_vol = static_cast<double>(t.volume);
+            if (t.aggressor == Side::Sell) signed_vol = -signed_vol;
+            delta_x[bucket] += signed_vol;
+        }
+
+        // Compute price changes between interval boundaries
+        for (size_t i = 1; i < num_intervals; ++i) {
+            double t_start = (i - 1) * interval_sec;
+            double t_end   = i * interval_sec;
+
+            Price p_start = find_nearest_mid(timed_midprices, t_start);
+            Price p_end   = find_nearest_mid(timed_midprices, t_end);
+
+            delta_p[i] = static_cast<double>(p_end - p_start);
+        }
+
+        // ── OLS Regression: ΔP = α + λ · ΔX + ε ──
+        // Skip first interval (no ΔP available)
+        std::vector<double> x, y;
+        for (size_t i = 1; i < num_intervals; ++i) {
+            if (delta_x[i] != 0.0) {  // Skip empty intervals
+                x.push_back(delta_x[i]);
+                y.push_back(delta_p[i]);
+            }
+        }
+
+        return ols_regression(x, y);
+    }
+
+    /**
+     * Compute impact curve: average price impact by trade size quantile.
+     */
+    std::vector<ImpactCurvePoint> compute_impact_curve(
+        const std::vector<TradeInput>& trades,
+        const std::vector<Price>& midprices_before,
+        const std::vector<Price>& midprices_after,
+        size_t num_quantiles = 10) const
+    {
+        assert(trades.size() == midprices_before.size());
+        assert(trades.size() == midprices_after.size());
+
+        // Compute per-trade impact
+        struct TradeImpact {
+            Quantity volume;
+            double   impact;
+        };
+
+        std::vector<TradeImpact> impacts;
+        for (size_t i = 0; i < trades.size(); ++i) {
+            double imp = std::abs(
+                static_cast<double>(midprices_after[i] - midprices_before[i])
+            );
+            impacts.push_back({trades[i].volume, imp});
+        }
+
+        // Sort by volume
+        std::sort(impacts.begin(), impacts.end(),
+            [](const auto& a, const auto& b) { return a.volume < b.volume; });
+
+        // Compute average impact per quantile
+        std::vector<ImpactCurvePoint> curve;
+        size_t per_bin = impacts.size() / num_quantiles;
+        if (per_bin == 0) per_bin = 1;
+
