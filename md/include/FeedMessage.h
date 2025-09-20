@@ -94,3 +94,51 @@ struct alignas(64) FeedMessage {
         msg.sequence = seq;
         msg.timestamp_ns = timestamp_ns_val(trade.exec_time);
         std::memcpy(msg.symbol, trade.symbol, sizeof(msg.symbol));
+        msg.order_id = trade.buy_order_id;
+        msg.match_id = trade.sell_order_id;
+        msg.price = trade.price;
+        msg.quantity = trade.quantity;
+        msg.aggressor_side = trade.aggressor;
+        return msg;
+    }
+
+    static FeedMessage make_delete(SeqNum seq, const Order& order) {
+        FeedMessage msg{};
+        msg.type = FeedMessageType::DeleteOrder;
+        msg.sequence = seq;
+        msg.timestamp_ns = timestamp_ns_val(order.last_update);
+        std::memcpy(msg.symbol, order.symbol, sizeof(msg.symbol));
+        msg.order_id = order.id;
+        msg.side = order.side;
+        msg.price = order.price;
+        return msg;
+    }
+
+    static FeedMessage make_quote(SeqNum seq, const char* sym,
+                                   Price bid_p, Quantity bid_s,
+                                   Price ask_p, Quantity ask_s) {
+        FeedMessage msg{};
+        msg.type = FeedMessageType::QuoteUpdate;
+        msg.sequence = seq;
+        msg.timestamp_ns = timestamp_ns_val(now());
+        std::memcpy(msg.symbol, sym, std::min(strlen(sym), sizeof(msg.symbol)));
+        msg.bid_price = bid_p;
+        msg.bid_size = bid_s;
+        msg.ask_price = ask_p;
+        msg.ask_size = ask_s;
+        return msg;
+    }
+
+private:
+    static uint64_t timestamp_ns_val(Timestamp ts) {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                ts.time_since_epoch()
+            ).count()
+        );
+    }
+};
+
+static_assert(sizeof(FeedMessage) <= 256,
+    "FeedMessage should fit in a small number of cache lines");
+
