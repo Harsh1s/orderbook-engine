@@ -157,4 +157,3 @@ private:
     std::lognormal_distribution<double> lognormal_;
 };
 
-} // namespace micro_exchange::sim
