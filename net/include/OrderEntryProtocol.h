@@ -43,3 +43,48 @@ enum class MsgType : uint8_t {
 };
 
 enum class AckStatus : uint8_t {
+    Accepted = 0,
+    Rejected = 1,
+    Cancelled = 2,
+    Unknown  = 3,
+};
+
+// These structs are deliberately NOT bit-packed. Fields are ordered
+// largest-first so every member is naturally aligned — no misaligned reads
+// (clean under UBSan) — and both ends share one compiler/ABI in this project,
+// so the on-wire layout matches without packing tricks. `pad` arrays make the
+// trailing bytes explicit rather than compiler-implicit.
+struct WireHeader {
+    uint32_t len;       // payload size in bytes
+    uint8_t  type;
+    uint8_t  pad[3];
+};
+
+struct WireNewOrder {
+    uint64_t id;
+    int64_t  price;     // ticks; 0 = market
+    uint64_t quantity;
+    uint8_t  side;      // 0 = buy, 1 = sell
+    uint8_t  type;      // core::OrderType
+    uint8_t  tif;       // core::TimeInForce
+    uint8_t  pad[5];
+    char     symbol[16];
+};
+
+struct WireCancel {
+    uint64_t id;
+    char     symbol[16];
+};
+
+struct WireAck {
+    uint64_t id;
+    uint64_t filled_qty;    // cumulative filled at ack time
+    uint8_t  status;        // AckStatus
+    uint8_t  pad[7];
+};
+
+struct WireExec {
+    uint64_t buy_order_id;
+    uint64_t sell_order_id;
+    int64_t  price;
+    uint64_t quantity;
