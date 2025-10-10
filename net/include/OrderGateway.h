@@ -187,3 +187,4 @@ private:
     uint64_t        execs_sent_ = 0;
 };
 
+} // namespace micro_exchange::net
