@@ -124,3 +124,68 @@ void time_latency(Book& book, const std::vector<NewOrderRequest>& orders,
 
 int main() {
     std::cout << "\n══════════════════════════════════════════════════════════\n";
+    std::cout << "  OrderBook (std::map)  vs  ArrayOrderBook (tick-indexed)\n";
+    std::cout << "══════════════════════════════════════════════════════════\n";
+
+    // ── 1. Correctness cross-check ──
+    {
+        auto orders = generate_orders(200000);
+        OrderBook      map_book("BENCH");
+        ArrayOrderBook arr_book("BENCH", kMinPrice, kMaxPrice);
+
+        auto map_trades = collect_trades(map_book, orders);
+        auto arr_trades = collect_trades(arr_book, orders);
+
+        bool ok = (map_trades.size() == arr_trades.size()) &&
+                  std::equal(map_trades.begin(), map_trades.end(), arr_trades.begin());
+
+        std::cout << "\n── Correctness ──\n";
+        std::cout << "  std::map  trades: " << map_trades.size() << "\n";
+        std::cout << "  array     trades: " << arr_trades.size() << "\n";
+        std::cout << "  identical trade stream: " << (ok ? "YES ✓" : "NO ✗") << "\n";
+        if (!ok) {
+            std::cout << "  FATAL: trade streams diverge — aborting benchmark.\n";
+            return 1;
+        }
+    }
+
+    // ── 2. Throughput ──
+    std::cout << "\n── Throughput (orders/sec) ──\n";
+    std::cout << "   N        │ std::map      │ array         │ speedup\n";
+    std::cout << "  ──────────┼───────────────┼───────────────┼─────────\n";
+    for (size_t n : {100000, 1000000}) {
+        auto orders = generate_orders(n);
+        OrderBook      map_book("BENCH");
+        ArrayOrderBook arr_book("BENCH", kMinPrice, kMaxPrice);
+
+        double map_tp = time_throughput(map_book, orders);
+        double arr_tp = time_throughput(arr_book, orders);
+
+        std::cout << "  " << std::setw(8) << n << "  │ "
+                  << std::setw(10) << std::fixed << std::setprecision(0) << map_tp << "/s │ "
+                  << std::setw(10) << arr_tp << "/s │ "
+                  << std::setw(5) << std::setprecision(2) << (arr_tp / map_tp) << "x\n";
+    }
+
+    // ── 3. Per-order latency ──
+    std::cout << "\n── Latency (ns/order, 1M orders) ──\n";
+    {
+        auto orders = generate_orders(1000000);
+        OrderBook      map_book("BENCH");
+        ArrayOrderBook arr_book("BENCH", kMinPrice, kMaxPrice);
+
+        uint64_t m50, m99, a50, a99;
+        time_latency(map_book, orders, m50, m99);
+        time_latency(arr_book, orders, a50, a99);
+
+        std::cout << "            │  P50   │  P99\n";
+        std::cout << "  ──────────┼────────┼────────\n";
+        std::cout << "  std::map  │ " << std::setw(5) << m50 << "  │ " << std::setw(5) << m99 << "\n";
+        std::cout << "  array     │ " << std::setw(5) << a50 << "  │ " << std::setw(5) << a99 << "\n";
+    }
+
+    std::cout << "\n══════════════════════════════════════════════════════════\n";
+    std::cout << "  Done.\n";
+    std::cout << "══════════════════════════════════════════════════════════\n\n";
+    return 0;
+}
