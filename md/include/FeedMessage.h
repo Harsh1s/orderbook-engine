@@ -142,3 +142,4 @@ private:
 static_assert(sizeof(FeedMessage) <= 256,
     "FeedMessage should fit in a small number of cache lines");
 
+} // namespace micro_exchange::md
