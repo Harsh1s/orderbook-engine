@@ -38,3 +38,43 @@ public:
     ArenaAllocator(const ArenaAllocator&) = delete;
     ArenaAllocator& operator=(const ArenaAllocator&) = delete;
     ArenaAllocator(ArenaAllocator&&) noexcept = default;
+    ArenaAllocator& operator=(ArenaAllocator&&) noexcept = default;
+
+    /**
+     * Allocate one T from the arena.
+     * Returns a pointer to uninitialized memory of sizeof(T).
+     * Caller must placement-new to construct.
+     */
+    [[nodiscard]] T* allocate() {
+        if (!free_head_) [[unlikely]] {
+            grow(capacity_ * 2);
+        }
+
+        FreeNode* node = free_head_;
+        free_head_ = node->next;
+        ++allocated_;
+        return reinterpret_cast<T*>(node);
+    }
+
+    /**
+     * Return a T to the arena. Caller must have called destructor first.
+     */
+    void deallocate(T* ptr) noexcept {
+        assert(ptr != nullptr);
+        auto* node = reinterpret_cast<FreeNode*>(ptr);
+        node->next = free_head_;
+        free_head_ = node;
+        --allocated_;
+    }
+
+    /**
+     * Construct a T in-place with forwarded arguments.
+     */
+    template <typename... Args>
+    [[nodiscard]] T* construct(Args&&... args) {
+        T* ptr = allocate();
+        return ::new (ptr) T(std::forward<Args>(args)...);
+    }
+
+    /**
+     * Destroy and return to pool.
