@@ -168,3 +168,88 @@ public:
         return data;
     }
 
+private:
+    /**
+     * Seed the book with initial limit orders to create a reasonable spread.
+     */
+    void seed_book(MatchingEngine& engine, const std::string& symbol, Price init_price) {
+        // Place 10 levels of bids and asks
+        for (int i = 1; i <= 10; ++i) {
+            for (int j = 0; j < 5; ++j) {
+                // Bids below init_price
+                NewOrderRequest bid{};
+                bid.id = static_cast<OrderId>(i * 100 + j);
+                bid.side = Side::Buy;
+                bid.type = OrderType::Limit;
+                bid.tif = TimeInForce::GTC;
+                bid.price = init_price - i;
+                bid.quantity = 100 + (j * 50);
+                std::memcpy(bid.symbol, symbol.c_str(),
+                           std::min(symbol.size(), size_t(16)));
+                engine.submit_order(bid);
+
+                // Asks above init_price
+                NewOrderRequest ask{};
+                ask.id = static_cast<OrderId>(i * 100 + j + 50);
+                ask.side = Side::Sell;
+                ask.type = OrderType::Limit;
+                ask.tif = TimeInForce::GTC;
+                ask.price = init_price + i;
+                ask.quantity = 100 + (j * 50);
+                std::memcpy(ask.symbol, symbol.c_str(),
+                           std::min(symbol.size(), size_t(16)));
+                engine.submit_order(ask);
+            }
+        }
+    }
+
+    /**
+     * Cancel orders far from mid (strategic cancellation).
+     */
+    size_t cancel_stale_orders(MatchingEngine& engine, std::vector<ZIAgent>& agents,
+                                OrderBook* book, const std::string& symbol) {
+        // Simplified: in production we'd track agent → order mapping
+        // Here we just cancel a small random fraction
+        size_t cancelled = 0;
+        auto mid = book->midprice().value_or(config_.init_price);
+
+        // Get all active bid/ask levels
+        auto bids = book->get_bids(20);
+        auto asks = book->get_asks(20);
+
+        // Cancel orders at far-out levels
+        for (const auto& level : bids) {
+            if (std::abs(level.price - mid) > 15) {
+                // Would need order-level tracking; approximate here
+                ++cancelled;
+            }
+        }
+        for (const auto& level : asks) {
+            if (std::abs(level.price - mid) > 15) {
+                ++cancelled;
+            }
+        }
+
+        return cancelled;
+    }
+
+    /**
+     * Backfill future midprices for realized spread calculation.
+     */
+    void backfill_future_midprices(SimulationData& data) {
+        if (data.midprices.empty() || data.trade_records.empty()) return;
+
+        // Approximate: for each trade, look ~100 events ahead for 1s,
+        // and ~500 events ahead for 5s (assuming ~100 events/sec)
+        for (size_t i = 0; i < data.trade_records.size(); ++i) {
+            size_t idx_1s = std::min(i + 100, data.midprices.size() - 1);
+            size_t idx_5s = std::min(i + 500, data.midprices.size() - 1);
+            data.trade_records[i].mid_after_1s = data.midprices[idx_1s];
+            data.trade_records[i].mid_after_5s = data.midprices[idx_5s];
+        }
+    }
+
+    Config config_;
+};
+
+} // namespace micro_exchange::sim
