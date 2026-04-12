@@ -162,3 +162,85 @@ public:
         size_t per_bin = impacts.size() / num_quantiles;
         if (per_bin == 0) per_bin = 1;
 
+        for (size_t q = 0; q < num_quantiles; ++q) {
+            size_t start = q * per_bin;
+            size_t end = std::min((q + 1) * per_bin, impacts.size());
+            if (start >= impacts.size()) break;
+
+            double sum = 0;
+            for (size_t i = start; i < end; ++i) {
+                sum += impacts[i].impact;
+            }
+
+            curve.push_back({
+                .volume_quantile = (q + 0.5) * 100.0 / num_quantiles,
+                .avg_impact = sum / (end - start)
+            });
+        }
+
+        return curve;
+    }
+
+private:
+    Price find_nearest_mid(const std::vector<std::pair<double, Price>>& mids, double t) const {
+        // Binary search for nearest timestamp
+        auto it = std::lower_bound(mids.begin(), mids.end(), t,
+            [](const auto& p, double val) { return p.first < val; });
+
+        if (it == mids.end()) return mids.back().second;
+        if (it == mids.begin()) return it->second;
+
+        auto prev = std::prev(it);
+        return (t - prev->first < it->first - t) ? prev->second : it->second;
+    }
+
+    KyleLambdaResult ols_regression(const std::vector<double>& x,
+                                     const std::vector<double>& y) const {
+        KyleLambdaResult result{};
+        size_t n = x.size();
+        if (n < 3) return result;
+
+        result.num_intervals = n;
+
+        // Compute means
+        double mean_x = std::accumulate(x.begin(), x.end(), 0.0) / n;
+        double mean_y = std::accumulate(y.begin(), y.end(), 0.0) / n;
+
+        // Compute slope (lambda) and intercept (alpha)
+        double ss_xy = 0, ss_xx = 0, ss_yy = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double dx = x[i] - mean_x;
+            double dy = y[i] - mean_y;
+            ss_xy += dx * dy;
+            ss_xx += dx * dx;
+            ss_yy += dy * dy;
+        }
+
+        if (ss_xx == 0) return result;
+
+        result.lambda = ss_xy / ss_xx;
+        result.alpha = mean_y - result.lambda * mean_x;
+
+        // R²
+        if (ss_yy > 0) {
+            result.r_squared = (ss_xy * ss_xy) / (ss_xx * ss_yy);
+        }
+
+        // Standard error and t-statistic
+        double sse = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double residual = y[i] - result.alpha - result.lambda * x[i];
+            sse += residual * residual;
+        }
+        double mse = sse / (n - 2);
+        result.std_error = std::sqrt(mse / ss_xx);
+
+        if (result.std_error > 0) {
+            result.t_statistic = result.lambda / result.std_error;
+        }
+
+        return result;
+    }
+};
+
+} // namespace micro_exchange::analytics
