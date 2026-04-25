@@ -78,3 +78,43 @@ public:
 
     /**
      * Destroy and return to pool.
+     */
+    void destroy(T* ptr) {
+        ptr->~T();
+        deallocate(ptr);
+    }
+
+    [[nodiscard]] size_t allocated() const noexcept { return allocated_; }
+    [[nodiscard]] size_t capacity() const noexcept { return capacity_; }
+
+private:
+    struct FreeNode {
+        FreeNode* next = nullptr;
+    };
+
+    static_assert(sizeof(T) >= sizeof(FreeNode),
+        "Arena element must be at least pointer-sized");
+
+    void grow(size_t count) {
+        // Allocate a contiguous slab
+        auto slab = std::make_unique<std::byte[]>(count * sizeof(T));
+        std::byte* raw = slab.get();
+
+        // Thread the free-list through the slab
+        for (size_t i = 0; i < count; ++i) {
+            auto* node = reinterpret_cast<FreeNode*>(raw + i * sizeof(T));
+            node->next = (i + 1 < count)
+                ? reinterpret_cast<FreeNode*>(raw + (i + 1) * sizeof(T))
+                : free_head_;  // Link to existing free-list tail
+        }
+        free_head_ = reinterpret_cast<FreeNode*>(raw);
+
+        capacity_ += count;
+        slabs_.push_back(std::move(slab));
+    }
+
+    FreeNode*                                  free_head_  = nullptr;
+    size_t                                     capacity_   = 0;
+    size_t                                     allocated_  = 0;
+    std::vector<std::unique_ptr<std::byte[]>>  slabs_;
+};
