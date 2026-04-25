@@ -118,3 +118,63 @@ struct alignas(64) Order {
     }
 
     // Hot-path variants take a caller-supplied timestamp. The matching engine
+    // captures now() once per inbound event and threads it through every fill,
+    // rather than re-reading the clock (~17ns) several times per order.
+    void fill(Quantity qty, Timestamp ts) noexcept {
+        filled_qty += qty;
+        leaves_qty -= qty;
+        last_update = ts;
+        status = (leaves_qty == 0) ? OrderStatus::Filled : OrderStatus::PartiallyFilled;
+    }
+    void fill(Quantity qty) noexcept { fill(qty, now()); }
+
+    void cancel(Timestamp ts) noexcept {
+        status = OrderStatus::Cancelled;
+        leaves_qty = 0;
+        last_update = ts;
+    }
+    void cancel() noexcept { cancel(now()); }
+};
+
+// ─────────────────────────────────────────────
+// Trade (execution report)
+// ─────────────────────────────────────────────
+
+struct Trade {
+    SeqNum      sequence     = 0;
+    OrderId     buy_order_id = 0;
+    OrderId     sell_order_id = 0;
+    Price       price        = 0;
+    Quantity    quantity     = 0;
+    Timestamp   exec_time    = {};
+    Side        aggressor    = Side::Buy;  // Who crossed the spread
+
+    char        symbol[16]   = {};
+};
+
+// ─────────────────────────────────────────────
+// Order request messages (input events)
+// ─────────────────────────────────────────────
+
+struct NewOrderRequest {
+    OrderId     id          = 0;
+    Side        side        = Side::Buy;
+    OrderType   type        = OrderType::Limit;
+    TimeInForce tif         = TimeInForce::GTC;
+    Price       price       = 0;
+    Price       stop_price  = 0;   // Stop / StopLimit trigger
+    Quantity    quantity    = 0;
+    char        symbol[16]  = {};
+};
+
+struct CancelRequest {
+    OrderId     order_id;
+    char        symbol[16];
+};
+
+struct AmendRequest {
+    OrderId     order_id;
+    Price       new_price;     // 0 = no change
+    Quantity    new_quantity;   // 0 = no change
+    char        symbol[16];
+};
