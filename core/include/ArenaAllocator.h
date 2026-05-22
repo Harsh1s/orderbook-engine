@@ -118,3 +118,5 @@ private:
     size_t                                     allocated_  = 0;
     std::vector<std::unique_ptr<std::byte[]>>  slabs_;
 };
+
+} // namespace micro_exchange::core
