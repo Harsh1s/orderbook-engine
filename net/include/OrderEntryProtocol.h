@@ -88,3 +88,49 @@ struct WireExec {
     uint64_t sell_order_id;
     int64_t  price;
     uint64_t quantity;
+    uint8_t  aggressor;     // 0 = buy, 1 = sell
+    uint8_t  pad[7];
+};
+
+// ── Blocking, partial-aware socket I/O ──
+
+// Read exactly `n` bytes (loops over short recv()s). False on EOF/error.
+inline bool read_full(int fd, void* buf, size_t n) {
+    auto* p = static_cast<char*>(buf);
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = ::read(fd, p + got, n - got);
+        if (r <= 0) return false;   // 0 = peer closed, <0 = error
+        got += static_cast<size_t>(r);
+    }
+    return true;
+}
+
+// Write exactly `n` bytes (loops over short write()s). False on error.
+inline bool write_full(int fd, const void* buf, size_t n) {
+    const auto* p = static_cast<const char*>(buf);
+    size_t put = 0;
+    while (put < n) {
+        ssize_t w = ::write(fd, p + put, n - put);
+        if (w <= 0) return false;
+        put += static_cast<size_t>(w);
+    }
+    return true;
+}
+
+// Send one framed message (header + payload).
+inline bool send_msg(int fd, MsgType type, const void* payload, uint32_t len) {
+    WireHeader h{};
+    h.type = static_cast<uint8_t>(type);
+    h.len  = len;
+    if (!write_full(fd, &h, sizeof(h))) return false;
+    if (len && !write_full(fd, payload, len)) return false;
+    return true;
+}
+
+// Receive one framed message header; caller then reads `out_hdr.len` bytes.
+inline bool recv_header(int fd, WireHeader& out_hdr) {
+    return read_full(fd, &out_hdr, sizeof(out_hdr));
+}
+
+} // namespace micro_exchange::net
