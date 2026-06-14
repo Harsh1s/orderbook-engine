@@ -76,3 +76,42 @@ public:
 
         T item = buffer_[read];
         read_pos_.store((read + 1) & MASK, std::memory_order_release);
+        return item;
+    }
+
+    /**
+     * Peek without consuming (consumer only).
+     */
+    [[nodiscard]] std::optional<T> peek() const noexcept {
+        const size_t read = read_pos_.load(std::memory_order_relaxed);
+
+        if (read == write_pos_.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+
+        return buffer_[read];
+    }
+
+    [[nodiscard]] bool empty() const noexcept {
+        return read_pos_.load(std::memory_order_acquire)
+            == write_pos_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] size_t size() const noexcept {
+        const size_t w = write_pos_.load(std::memory_order_acquire);
+        const size_t r = read_pos_.load(std::memory_order_acquire);
+        return (w - r) & MASK;
+    }
+
+    [[nodiscard]] static constexpr size_t capacity() noexcept {
+        return Capacity - 1;  // One slot reserved for full/empty disambiguation
+    }
+
+private:
+    // Separate cache lines to prevent false sharing
+    alignas(64) std::atomic<size_t>  write_pos_{0};
+    alignas(64) std::atomic<size_t>  read_pos_{0};
+    alignas(64) std::array<T, Capacity> buffer_{};
+};
+
+} // namespace micro_exchange::md

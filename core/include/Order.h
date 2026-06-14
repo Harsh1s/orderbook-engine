@@ -178,3 +178,5 @@ struct AmendRequest {
     Quantity    new_quantity;   // 0 = no change
     char        symbol[16];
 };
+
+} // namespace micro_exchange::core

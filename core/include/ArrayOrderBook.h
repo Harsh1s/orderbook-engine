@@ -260,3 +260,134 @@ private:
                                    : static_cast<long>(idx(std::max(incoming->price, min_price_)));
 
         while (incoming->leaves_qty > 0 && best_bid_idx_ >= 0 && best_bid_idx_ >= limit_idx) {
+            PriceLevel& level = levels_[static_cast<size_t>(best_bid_idx_)];
+            fill_against_level(incoming, level);
+            if (level.empty()) {
+                clr_occ(static_cast<size_t>(best_bid_idx_));
+                best_bid_idx_ = next_occ_le(best_bid_idx_ - 1);   // sweep to next bid
+            }
+        }
+    }
+
+    // Fill `incoming` against the FIFO queue at `level` until one side empties.
+    // Byte-for-byte the same trade construction as OrderBook::match_against, so
+    // both books emit identical trade streams.
+    void fill_against_level(Order* incoming, PriceLevel& level) {
+        while (incoming->leaves_qty > 0 && !level.empty()) {
+            Order* resting = level.front();
+            Quantity fill_qty = std::min(incoming->leaves_qty, resting->leaves_qty);
+
+            Trade trade{};
+            trade.sequence  = next_sequence_++;
+            trade.price     = resting->price;   // price improvement to the resting side
+            trade.quantity  = fill_qty;
+            trade.exec_time = ts_;
+            trade.aggressor = incoming->side;
+            std::memcpy(trade.symbol, incoming->symbol, sizeof(trade.symbol));
+
+            if (incoming->is_buy()) {
+                trade.buy_order_id  = incoming->id;
+                trade.sell_order_id = resting->id;
+            } else {
+                trade.buy_order_id  = resting->id;
+                trade.sell_order_id = incoming->id;
+            }
+
+            level.reduce_quantity(fill_qty);
+            incoming->fill(fill_qty, ts_);
+            resting->fill(fill_qty, ts_);
+
+            notify_trade(trade);
+            notify_order(*resting);
+
+            ++trade_count_;
+            total_volume_ += fill_qty;
+            last_trade_price_ = trade.price;
+
+            if (resting->is_filled()) {
+                level.pop_front();
+                order_index_.erase(resting->id);
+            }
+        }
+    }
+
+    bool can_fill_completely(const Order* order) const {
+        Quantity needed = order->leaves_qty;
+        const bool is_market =
+            order->type == OrderType::Market || order->price == PRICE_MARKET;
+
+        if (order->is_buy()) {
+            long limit_idx = is_market ? static_cast<long>(levels_.size()) - 1
+                                       : static_cast<long>(idx(std::min(order->price, max_price_)));
+            const long n = static_cast<long>(levels_.size());
+            for (long i = best_ask_idx_; i < n && i <= limit_idx; ++i) {
+                needed -= std::min(needed, levels_[static_cast<size_t>(i)].total_quantity());
+                if (needed == 0) return true;
+            }
+        } else {
+            long limit_idx = is_market ? 0
+                                       : static_cast<long>(idx(std::max(order->price, min_price_)));
+            for (long i = best_bid_idx_; i >= 0 && i >= limit_idx; --i) {
+                needed -= std::min(needed, levels_[static_cast<size_t>(i)].total_quantity());
+                if (needed == 0) return true;
+            }
+        }
+        return needed == 0;
+    }
+
+    // ── Book management ──
+    void rest_order(Order* order) {
+        const size_t i = idx(order->price);
+        const bool was_empty = levels_[i].empty();
+        levels_[i].push_back(order);
+        if (was_empty) set_occ(i);
+        if (order->is_buy()) {
+            if (static_cast<long>(i) > best_bid_idx_) best_bid_idx_ = static_cast<long>(i);
+        } else {
+            if (static_cast<long>(i) < best_ask_idx_) best_ask_idx_ = static_cast<long>(i);
+        }
+    }
+
+    void remove_from_book(Order* order) {
+        if (!in_band(order->price)) return;
+        const size_t i = idx(order->price);
+        levels_[i].remove(order);
+        if (levels_[i].empty()) {
+            clr_occ(i);
+            if (order->is_buy() && static_cast<long>(i) == best_bid_idx_) {
+                best_bid_idx_ = next_occ_le(best_bid_idx_ - 1);
+            } else if (!order->is_buy() && static_cast<long>(i) == best_ask_idx_) {
+                best_ask_idx_ = next_occ_ge(best_ask_idx_ + 1);
+            }
+        }
+    }
+
+    // ── Notifications ──
+    void notify_trade(const Trade& t) { for (auto& cb : trade_listeners_) cb(t); }
+    void notify_order(const Order& o) { for (auto& cb : order_listeners_) cb(o); }
+
+    // ── Members ──
+    std::string             symbol_;
+    Price                   min_price_;
+    Price                   max_price_;
+    std::vector<PriceLevel> levels_;          // contiguous, indexed by price - min_price_
+    std::vector<uint64_t>   occ_;             // occupied-level bitmap (1 bit / level)
+
+    long best_bid_idx_ = -1;                  // highest occupied bid level, or -1
+    long best_ask_idx_ = 0;                   // lowest occupied ask level, or levels_.size()
+
+    std::unordered_map<OrderId, Order*> order_index_;
+    ArenaAllocator<Order>               order_arena_;
+
+    Timestamp ts_{};   // wall-clock captured once per inbound event (hot path)
+
+    SeqNum   next_sequence_     = 1;
+    uint64_t trade_count_       = 0;
+    uint64_t total_volume_      = 0;
+    Price    last_trade_price_  = 0;
+
+    std::vector<TradeCallback> trade_listeners_;
+    std::vector<OrderCallback> order_listeners_;
+};
+
+} // namespace micro_exchange::core

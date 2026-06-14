@@ -79,3 +79,4 @@ set_tests_properties(gateway_e2e PROPERTIES
 install(TARGETS micro_exchange test_invariants test_gateway
         bench_throughput bench_latency bench_orderbook_compare
     RUNTIME DESTINATION bin
+)

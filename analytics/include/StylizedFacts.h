@@ -88,3 +88,184 @@ public:
         const std::vector<Quantity>& volumes = {},
         const std::vector<Price>& spreads = {},
         const std::vector<double>& imbalances = {}) const
+    {
+        FactMetrics result{};
+
+        // ── Sample the midprice on fixed clock-time bars, then take LOG returns ──
+        //
+        // Why not per-event returns? The raw event series samples the midpoint on
+        // every order arrival, but ~99% of arrivals don't move the (integer-tick)
+        // mid. That yields a return series dominated by exact zeros, which
+        // manufactures enormous spurious excess kurtosis (a delta spike at zero)
+        // and crushes the autocorrelation of |r|. Stylized facts are defined on
+        // returns sampled at a fixed frequency (Cont, 2001), so we bucket the mid
+        // into bars of `bar_sec` seconds, take the last mid observed in each bar,
+        // and compute log returns r_k = ln(M_k / M_{k-1}).
+        std::vector<double> bar_close;
+        if (!mid_times.empty() && mid_times.size() == midprices.size() && bar_sec > 0.0) {
+            const double t0 = mid_times.front();
+            long cur_bar = -1;
+            double last_mid = 0.0;
+            for (size_t i = 0; i < midprices.size(); ++i) {
+                long b = static_cast<long>((mid_times[i] - t0) / bar_sec);
+                if (b != cur_bar) {
+                    if (cur_bar >= 0) bar_close.push_back(last_mid);
+                    cur_bar = b;
+                }
+                last_mid = static_cast<double>(midprices[i]);
+            }
+            if (cur_bar >= 0) bar_close.push_back(last_mid);
+        } else {
+            // Fallback (no timestamps supplied): use the raw mid series as-is.
+            bar_close.assign(midprices.begin(), midprices.end());
+        }
+
+        std::vector<double> returns;
+        returns.reserve(bar_close.size());
+        for (size_t i = 1; i < bar_close.size(); ++i) {
+            if (bar_close[i-1] > 0.0 && bar_close[i] > 0.0) {
+                returns.push_back(std::log(bar_close[i] / bar_close[i-1]));
+            }
+        }
+
+        if (returns.size() < 20) return result;
+
+        // ── Fat tails ──
+        double mean = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
+        double var = 0, m3 = 0, m4 = 0;
+        for (double r : returns) {
+            double d = r - mean;
+            var += d * d;
+            m3 += d * d * d;
+            m4 += d * d * d * d;
+        }
+        var /= returns.size();
+        m3 /= returns.size();
+        m4 /= returns.size();
+
+        double std_dev = std::sqrt(var);
+        if (std_dev > 0) {
+            result.return_skewness = m3 / (std_dev * std_dev * std_dev);
+            result.return_kurtosis = m4 / (var * var) - 3.0;  // Excess kurtosis
+        }
+
+        // Jarque-Bera
+        double n = returns.size();
+        result.jarque_bera_stat = (n / 6.0) *
+            (result.return_skewness * result.return_skewness +
+             0.25 * result.return_kurtosis * result.return_kurtosis);
+
+        // ── Volatility clustering ──
+        std::vector<double> abs_returns(returns.size());
+        std::vector<double> sq_returns(returns.size());
+        std::transform(returns.begin(), returns.end(), abs_returns.begin(),
+            [](double r) { return std::abs(r); });
+        std::transform(returns.begin(), returns.end(), sq_returns.begin(),
+            [](double r) { return r * r; });
+
+        result.abs_return_ac_lag1 = autocorrelation(abs_returns, 1);
+        result.abs_return_ac_lag5 = autocorrelation(abs_returns, 5);
+        result.abs_return_ac_lag10 = autocorrelation(abs_returns, 10);
+        result.squared_return_ac_lag1 = autocorrelation(sq_returns, 1);
+
+        // ── Volume-volatility correlation ──
+        if (!volumes.empty() && volumes.size() >= returns.size()) {
+            std::vector<double> vol_d(volumes.begin(),
+                volumes.begin() + std::min(volumes.size(), abs_returns.size()));
+            std::vector<double> abs_r(abs_returns.begin(),
+                abs_returns.begin() + vol_d.size());
+            result.volume_volatility_corr = correlation(
+                std::vector<double>(vol_d.begin(), vol_d.end()), abs_r);
+        }
+
+        // ── Spread dynamics ──
+        if (!spreads.empty() && spreads.size() >= returns.size()) {
+            std::vector<double> sprd_d;
+            for (size_t i = 0; i < std::min(spreads.size(), abs_returns.size()); ++i) {
+                sprd_d.push_back(static_cast<double>(spreads[i]));
+            }
+            std::vector<double> abs_r(abs_returns.begin(),
+                abs_returns.begin() + sprd_d.size());
+            result.spread_vol_corr = correlation(sprd_d, abs_r);
+        }
+
+        if (!imbalances.empty() && imbalances.size() >= returns.size()) {
+            std::vector<double> abs_imb;
+            for (size_t i = 0; i < std::min(imbalances.size(), abs_returns.size()); ++i) {
+                abs_imb.push_back(std::abs(imbalances[i]));
+            }
+            std::vector<double> sprd_d;
+            for (size_t i = 0; i < abs_imb.size() && i < spreads.size(); ++i) {
+                sprd_d.push_back(static_cast<double>(spreads[i]));
+            }
+            if (sprd_d.size() == abs_imb.size()) {
+                result.spread_imbalance_corr = correlation(sprd_d, abs_imb);
+            }
+        }
+
+        // ── Fact checks ──
+        result.fact_checks = {
+            {"Fat tails (kurtosis > 3)", result.return_kurtosis > 0,
+             result.return_kurtosis, "> 0 (excess kurtosis)"},
+            {"Volatility clustering (AC|r| lag1 > 0.1)", result.abs_return_ac_lag1 > 0.1,
+             result.abs_return_ac_lag1, "0.15-0.40"},
+            {"Slow AC decay (lag10 > 0)", result.abs_return_ac_lag10 > 0,
+             result.abs_return_ac_lag10, "> 0"},
+        };
+
+        if (!volumes.empty()) {
+            result.fact_checks.push_back(
+                {"Volume-volatility correlation > 0.1",
+                 result.volume_volatility_corr > 0.1,
+                 result.volume_volatility_corr, "> 0.3 typical"});
+        }
+
+        if (!spreads.empty()) {
+            result.fact_checks.push_back(
+                {"Spread widens with volatility",
+                 result.spread_vol_corr > 0,
+                 result.spread_vol_corr, "> 0"});
+        }
+
+        return result;
+    }
+
+private:
+    double autocorrelation(const std::vector<double>& x, size_t lag) const {
+        if (x.size() <= lag) return 0;
+        size_t n = x.size();
+        double mean = std::accumulate(x.begin(), x.end(), 0.0) / n;
+
+        double numerator = 0, denominator = 0;
+        for (size_t i = 0; i < n; ++i) {
+            denominator += (x[i] - mean) * (x[i] - mean);
+            if (i >= lag) {
+                numerator += (x[i] - mean) * (x[i - lag] - mean);
+            }
+        }
+
+        return (denominator > 0) ? numerator / denominator : 0;
+    }
+
+    double correlation(const std::vector<double>& x, const std::vector<double>& y) const {
+        size_t n = std::min(x.size(), y.size());
+        if (n < 3) return 0;
+
+        double mean_x = std::accumulate(x.begin(), x.begin() + n, 0.0) / n;
+        double mean_y = std::accumulate(y.begin(), y.begin() + n, 0.0) / n;
+
+        double ss_xy = 0, ss_xx = 0, ss_yy = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double dx = x[i] - mean_x;
+            double dy = y[i] - mean_y;
+            ss_xy += dx * dy;
+            ss_xx += dx * dx;
+            ss_yy += dy * dy;
+        }
+
+        double denom = std::sqrt(ss_xx * ss_yy);
+        return (denom > 0) ? ss_xy / denom : 0;
+    }
+};
+
+} // namespace micro_exchange::analytics

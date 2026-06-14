@@ -154,3 +154,4 @@ private:
     GlobalTradeCallback global_trade_callback_;
 };
 
+} // namespace micro_exchange::core
